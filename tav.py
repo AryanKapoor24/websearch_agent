@@ -2,27 +2,37 @@ from langchain_groq import ChatGroq
 from langchain_tavily import TavilySearch
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
-
-
-# LLM
 llm = ChatGroq(model="llama-3.1-8b-instant")
+tools = [TavilySearch(max_results=3)]
+llm_with_tools = llm.bind_tools(tools)
 
-# Tool only 1 as of now
-search_tool = TavilySearchResults(max_results=3)
-tools = [search_tool]
+# NODE 1 — LLM thinks and decides
+def call_llm(state: MessagesState):
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
 
-# tells LLM how to think and decide
-prompt = hub.pull("hwchase17/react")
+# NODE 2 — Tavily runs if LLM decided to search
+tool_node = ToolNode(tools)
 
-# Create agent
-agent = create_react_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+# EDGE — should we search or are we done?
+def should_search(state: MessagesState):
+    last_message = state["messages"][-1]
+    if last_message.tool_calls:
+        return "search"   # LLM wants to use a tool
+    return END            # LLM has final answer
 
-# Run with user input
-query = input("Ask me anything: ")
-result = agent_executor.invoke({"input": query})
-print(result["output"])
+# BUILD THE GRAPH
+graph = StateGraph(MessagesState)
+
+graph.add_node("llm", call_llm)
+graph.add_node("search", tool_node)
+
+graph.add_edge(START, "llm")
+graph.add_conditional_edges("llm", should_search)
+graph.add_edge("search", "llm")  # after search, go back to LLM
+
+agent = graph.compile()
+
+result = agent.invoke({"messages": [{"role": "user", "content": "Who is Messi?"}]})
+print(result["messages"][-1].content)
